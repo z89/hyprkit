@@ -1,11 +1,13 @@
 <p align="center">
-  <img src="https://hyprland.org/img/logo.svg" width="80" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/z89/hyprkit/main/assets/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/z89/hyprkit/main/assets/logo-light.svg">
+    <img src="https://raw.githubusercontent.com/z89/hyprkit/main/assets/logo-dark.svg" width="420" alt="hyprkit" />
+  </picture>
 </p>
 
-<h1 align="center">hyprkit</h1>
-
 <p align="center">
-  <b>A collection of scripts and utilities for Hyprland desktops</b>
+  <code>scripts and utilities for Hyprland desktops</code>
 </p>
 
 <p align="center">
@@ -32,15 +34,9 @@ theme-switch --random     # random wallpaper
 - Wallpaper via `swww` with a circle-reveal animation from cursor position
 - Hyprland window borders and shadows
 - HyprPanel bar and menu colors
-- Kitty terminal colors
+- Kitty terminal colors (smooth fade transition)
 - GTK 3/4 theme variables
 - GNOME accent color
-
-<details>
-<summary>Screenshot</summary>
-<br>
-<i>Coming soon</i>
-</details>
 
 ---
 
