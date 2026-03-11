@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Set up Notion with matugen theme switching via CDP color injection
+set -euo pipefail
+
+if ! pacman -Q notion-app-electron &>/dev/null; then
+    echo "Installing notion-app-electron..."
+    yay -S --noconfirm notion-app-electron
+fi
+
+echo "Creating notion-flags.conf for CDP remote debugging..."
+mkdir -p ~/.config
+cat > ~/.config/notion-flags.conf << 'FLAGS'
+--remote-debugging-port=9223
+FLAGS
+
+echo "Done. Restart Notion for changes to take effect."
+echo "Colors update automatically via theme-switch (no restart needed)."

@@ -20,12 +20,44 @@ apply_theme() {
     pos_x=$(hyprctl cursorpos -j 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['x'])" 2>/dev/null || echo 960)
     pos_y=$(hyprctl cursorpos -j 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['y'])" 2>/dev/null || echo 540)
 
-    # Save current kitty colors before regenerating
-    local old_colors="/tmp/kitty-colors-old.conf"
-    cp ~/.config/kitty/colors.conf "$old_colors" 2>/dev/null
+    # Save current colors before regenerating
+    cp ~/.config/kitty/colors.conf /tmp/kitty-colors-old.conf 2>/dev/null
+    cp ~/.cache/matugen/hyprland-colors.conf /tmp/hyprland-colors-old.conf 2>/dev/null
+    # Capture hyprpanel's current SCSS variables (source of truth for matugen colors)
+    cp /tmp/hyprpanel/variables.scss /tmp/hyprpanel-vars-old.scss 2>/dev/null
+
+    # Build old hyprpanel colors JSON before anything changes
+    python3 << 'SCSSPARSE_OLD'
+import re, json
+def parse_scss(path):
+    colors = {}
+    with open(path) as f:
+        for line in f:
+            m = re.match(r'^\$([\w-]+):\s*(#[0-9a-fA-F]{6,8})\s*;', line)
+            if m:
+                colors['theme.' + m.group(1).replace('-', '.')] = m.group(2)[:7]
+    return colors
+json.dump(parse_scss('/tmp/hyprpanel-vars-old.scss'), open('/tmp/hyprpanel-colors-old.json', 'w'))
+SCSSPARSE_OLD
 
     # Generate colorscheme from wallpaper
+    # (hyprland colors go to ~/.cache/matugen/ so the file watcher
+    # on ~/.config/hypr/colors.conf is not triggered during the fade)
     matugen image "$wallpaper"
+
+    # Build new hyprpanel colors JSON from freshly generated SCSS
+    python3 << 'SCSSPARSE_NEW'
+import re, json
+def parse_scss(path):
+    colors = {}
+    with open(path) as f:
+        for line in f:
+            m = re.match(r'^\$([\w-]+):\s*(#[0-9a-fA-F]{6,8})\s*;', line)
+            if m:
+                colors['theme.' + m.group(1).replace('-', '.')] = m.group(2)[:7]
+    return colors
+json.dump(parse_scss('/tmp/hyprpanel/variables.scss'), open('/tmp/hyprpanel-colors-new.json', 'w'))
+SCSSPARSE_NEW
 
     # Map matugen primary color to nearest GNOME accent preset
     local primary_hex
@@ -61,15 +93,175 @@ print(name)
         --transition-fps 60 \
         --transition-bezier 0.65,0,0.35,1
 
-    # Hyprland auto-reloads colors.conf on file change
-
-    # Update hyprpanel wallpaper to trigger its matugen color regeneration
-    hyprpanel "setWallpaper $wallpaper" &>/dev/null &
-
-    # Fade kitty colors from old to new (runs in background)
+    # Fade all colors from old to new in sync (runs in background)
     local script_dir
     script_dir="$(dirname "$(readlink -f "$0")")"
-    "$script_dir/kitty-color-fade" "$old_colors" ~/.config/kitty/colors.conf &
+    THEME_SWITCH_WALLPAPER="$wallpaper" "$script_dir/color-fade" kitty hyprland hyprpanel &
+
+    # Hot-reload spicetify colors via CDP (no Spotify restart)
+    if pgrep -x spotify >/dev/null; then
+        python3 << 'SPICEPY' &>/dev/null &
+import json, socket, os, sys, struct, base64, urllib.request
+
+color_ini = os.path.expanduser("~/.config/spicetify/Themes/matugen/color.ini")
+if not os.path.exists(color_ini):
+    sys.exit(0)
+
+# Parse color.ini into JS that sets CSS custom properties
+js_parts = ["var s=document.documentElement.style"]
+with open(color_ini) as f:
+    for line in f:
+        line = line.strip()
+        if not line or line.startswith(";") or line.startswith("["):
+            continue
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip()
+        r, g, b = int(val[0:2], 16), int(val[2:4], 16), int(val[4:6], 16)
+        js_parts.append(f"s.setProperty('--spice-{key}','#{val}')")
+        js_parts.append(f"s.setProperty('--spice-rgb-{key}','{r},{g},{b}')")
+js = ";".join(js_parts)
+
+# Get WebSocket URL from CDP
+try:
+    tabs = json.loads(urllib.request.urlopen("http://localhost:9222/json").read())
+    ws_url = tabs[0]["webSocketDebuggerUrl"]
+except Exception:
+    sys.exit(0)
+
+# WebSocket handshake
+_, _, hostport, path = ws_url.split("/", 3)
+host, port = hostport.split(":")
+ws_key = base64.b64encode(os.urandom(16)).decode()
+sock = socket.create_connection((host, int(port)), timeout=5)
+sock.sendall(f"GET /{path} HTTP/1.1\r\nHost: {hostport}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {ws_key}\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
+resp = b""
+while b"\r\n\r\n" not in resp:
+    resp += sock.recv(4096)
+
+# Send CDP Runtime.evaluate
+msg = json.dumps({"id": 1, "method": "Runtime.evaluate", "params": {"expression": js}}).encode()
+frame = bytearray([0x81])
+mask = os.urandom(4)
+length = len(msg)
+if length < 126:
+    frame.append(0x80 | length)
+elif length < 65536:
+    frame.append(0x80 | 126)
+    frame.extend(struct.pack(">H", length))
+else:
+    frame.append(0x80 | 127)
+    frame.extend(struct.pack(">Q", length))
+frame.extend(mask)
+frame.extend(bytes(b ^ mask[i % 4] for i, b in enumerate(msg)))
+sock.sendall(frame)
+sock.recv(4096)
+sock.close()
+SPICEPY
+    fi
+
+    # Hot-reload Notion colors via CDP
+    if curl -s -o /dev/null http://localhost:9223/json 2>/dev/null; then
+        python3 << 'NOTIONPY' &>/dev/null &
+import json, socket, os, sys, struct, base64, urllib.request
+
+css_file = os.path.expanduser("~/.cache/matugen/notion-colors.css")
+if not os.path.exists(css_file):
+    sys.exit(0)
+
+with open(css_file) as f:
+    css = f.read().replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+
+# Extract --c-bacPri value from the CSS for the tab bar
+import re
+bac_pri_match = re.search(r'--c-bacPri:\s*(#[0-9a-fA-F]+)', css)
+bac_sec = re.search(r'--c-bacSec:\s*(#[0-9a-fA-F]+)', css)
+bac_pri_hex = bac_pri_match.group(1) if bac_pri_match else '#191919'
+bac_sec_hex = bac_sec.group(1) if bac_sec else '#202020'
+
+# JS for main Notion pages (CSS var overrides)
+page_js = """
+(function() {
+    let el = document.getElementById('matugen-theme');
+    if (!el) {
+        el = document.createElement('style');
+        el.id = 'matugen-theme';
+        document.head.appendChild(el);
+    }
+    el.textContent = `""" + css + """`;
+})();
+"""
+
+# JS for the tab bar (hardcoded inline styles, no CSS vars)
+tab_js = """
+(function() {
+    let el = document.getElementById('matugen-theme');
+    if (!el) {
+        el = document.createElement('style');
+        el.id = 'matugen-theme';
+        document.head.appendChild(el);
+    }
+    el.textContent = `.notion-dark-theme.root { background-color: """ + bac_pri_hex + """ !important; } .hide-scrollbar { background: """ + bac_sec_hex + """ !important; }`;
+    // Patch all elements with inline background styles
+    var root = document.querySelector('.notion-dark-theme.root');
+    if (root) root.style.backgroundColor = '""" + bac_pri_hex + """';
+    document.querySelectorAll('*').forEach(function(e) {
+        var s = e.getAttribute('style') || '';
+        if (s.includes('background-color:') && !s.includes('transparent'))
+            e.style.backgroundColor = '""" + bac_pri_hex + """';
+        else if (s.includes('background:') && !s.includes('transparent') && !s.includes('linear-gradient'))
+            e.style.background = '""" + bac_sec_hex + """';
+    });
+})();
+"""
+
+def cdp_send(ws_url, expression):
+    _, _, hostport, path = ws_url.split("/", 3)
+    host, port = hostport.split(":")
+    ws_key = base64.b64encode(os.urandom(16)).decode()
+    sock = socket.create_connection((host, int(port)), timeout=5)
+    sock.sendall(f"GET /{path} HTTP/1.1\r\nHost: {hostport}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {ws_key}\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
+    resp = b""
+    while b"\r\n\r\n" not in resp:
+        resp += sock.recv(4096)
+    msg = json.dumps({"id": 1, "method": "Runtime.evaluate", "params": {"expression": expression}}).encode()
+    frame = bytearray([0x81])
+    mask = os.urandom(4)
+    length = len(msg)
+    if length < 126:
+        frame.append(0x80 | length)
+    elif length < 65536:
+        frame.append(0x80 | 126)
+        frame.extend(struct.pack(">H", length))
+    else:
+        frame.append(0x80 | 127)
+        frame.extend(struct.pack(">Q", length))
+    frame.extend(mask)
+    frame.extend(bytes(b ^ mask[i % 4] for i, b in enumerate(msg)))
+    sock.sendall(frame)
+    sock.recv(4096)
+    sock.close()
+
+try:
+    tabs = json.loads(urllib.request.urlopen("http://localhost:9223/json").read())
+except Exception:
+    sys.exit(0)
+
+for tab in tabs:
+    if tab.get("type") != "page":
+        continue
+    url = tab.get("url", "")
+    title = tab.get("title", "")
+    try:
+        if "notion.so" in url:
+            cdp_send(tab["webSocketDebuggerUrl"], page_js)
+        elif title == "Tab Bar":
+            cdp_send(tab["webSocketDebuggerUrl"], tab_js)
+    except Exception:
+        pass
+NOTIONPY
+    fi
+
+    # BetterDiscord watches the theme file via fs.watch on the themes directory
 
     # Restart GTK apps to pick up new colors
     if pgrep -x nautilus >/dev/null; then
