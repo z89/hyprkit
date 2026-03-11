@@ -20,6 +20,10 @@ apply_theme() {
     pos_x=$(hyprctl cursorpos -j 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['x'])" 2>/dev/null || echo 960)
     pos_y=$(hyprctl cursorpos -j 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['y'])" 2>/dev/null || echo 540)
 
+    # Save current kitty colors before regenerating
+    local old_colors="/tmp/kitty-colors-old.conf"
+    cp ~/.config/kitty/colors.conf "$old_colors" 2>/dev/null
+
     # Generate colorscheme from wallpaper
     matugen image "$wallpaper"
 
@@ -62,10 +66,10 @@ print(name)
     # Update hyprpanel wallpaper to trigger its matugen color regeneration
     hyprpanel "setWallpaper $wallpaper" &>/dev/null &
 
-    # Reload kitty colors in all running instances
-    for pid in $(pgrep kitty); do
-        kill -SIGUSR1 "$pid" 2>/dev/null
-    done
+    # Fade kitty colors from old to new (runs in background)
+    local script_dir
+    script_dir="$(dirname "$(readlink -f "$0")")"
+    "$script_dir/kitty-color-fade" "$old_colors" ~/.config/kitty/colors.conf &
 
     # Restart GTK apps to pick up new colors
     if pgrep -x nautilus >/dev/null; then
